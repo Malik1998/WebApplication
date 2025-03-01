@@ -79,7 +79,7 @@ def get_conn_str():
     host={TEMP_HOST_NAME_POSTGRESS}
     port={POSTGRESS_PORT}
     """
-print(get_conn_str())
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.async_pool = AsyncConnectionPool(conninfo=get_conn_str())
@@ -188,8 +188,15 @@ async def find_video_by_image(query: ImageQueryRaw, request: Request) -> ListOfR
 
 @app.get("/find_video_by_text")
 async def find_video_by_text(query: TextQueryRaw, request: Request) -> ListOfResultData:
+
     embedding = (await get_text_embedding(query))["embedding"]
-    return await get_video_content_from_db([embedding], limit=query.limit, request=request, filter_query_ids=query.used_ids)
+    by_text_search = await full_text_search(request, query.text, table_name="video_content", ts_index="ts_video")
+
+    by_embedding_search =await get_video_content_from_db([embedding], limit=query.limit, request=request, filter_query_ids=query.used_ids)
+    full_list = by_text_search["list_of_data"] + by_embedding_search["list_of_data"]
+    random.shuffle(full_list)
+
+    return {"list_of_data": full_list} 
 
 
 @app.middleware("http")
