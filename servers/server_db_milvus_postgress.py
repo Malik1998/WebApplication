@@ -27,7 +27,7 @@ POSTGRESS_USER_NAME = os.getenv("POSTGRESS_USER_NAME")
 POSTGRESS_USER_PASSWORD = os.getenv("POSTGRESS_USER_PASSWORD")
 
 TEMP_CURRENT_HOST = os.getenv("LOCAL_HOST_ADDRESS", "localhost")
-TEMP_HOST_NAME_POSTGRESS = os.getenv("TEMP_HOST_NAME_POSTGRESS", "10240d83e64d")
+TEMP_HOST_NAME_POSTGRESS = os.getenv("TEMP_HOST_NAME_POSTGRESS", "fd301d06fec2")
 TEMP_HOST_NAME_MILVUS = os.getenv("TEMP_HOST_NAME_MILVUS", "ac5a7858b1bd")
 TEMP_HOST_NAME_EMBEDDER = os.getenv("TEMP_HOST_NAME_MILVUS", TEMP_CURRENT_HOST)
 
@@ -79,7 +79,7 @@ def get_conn_str():
     host={TEMP_HOST_NAME_POSTGRESS}
     port={POSTGRESS_PORT}
     """
-
+print(get_conn_str())
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.async_pool = AsyncConnectionPool(conninfo=get_conn_str())
@@ -143,27 +143,51 @@ class ResultData(BaseModel):
 class ListOfResultData(BaseModel):
     list_of_data: list[ResultData]
 
+
+async def full_text_search(request, text_string, ts_index="ts", columns="content_id,extra_tags_description,urls_main_url,urls_affilated_url",
+                            table_name="img_content"):
+    async with request.app.async_pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(f"SELECT  {columns} FROM {table_name} WHERE {ts_index} @@ phraseto_tsquery('english', '{text_string}') LIMIT 100;")
+            result_list = [{col_name: v for v, col_name in zip(row, columns.split(","))} for row in await cur.fetchall()]
+            returned_data = []
+            for r in result_list:
+                returned_data.append({IMG_URL: r["urls_main_url"],\
+                TEXT_CAPTION: r["extra_tags_description"][:CAPTION_LIMIT_SIZE], \
+                ID: str(r["content_id"]), \
+                POST_URL: r["urls_affilated_url"],
+                VIDEO_URL: ""})
+
+            return {"list_of_data":  returned_data}
+
+
 @app.get("/find_data_by_image")
-async def find_data_by_image_embedding(query: ImageQueryRaw, request: Request) -> ListOfResultData:
+async def find_data_by_image(query: ImageQueryRaw, request: Request) -> ListOfResultData:
     embedding = (await get_image_embedding(query))["embedding"]
     return await get_img_content_from_db([embedding], limit=query.limit, request=request, filter_query_ids=query.used_ids)
 
 
 @app.get("/find_data_by_text")
-async def find_data_by_text_embedding(query: TextQueryRaw, request: Request) -> ListOfResultData:
+async def find_data_by_text(query: TextQueryRaw, request: Request) -> ListOfResultData:
     embedding = (await get_text_embedding(query))["embedding"]
-    return await get_img_content_from_db([embedding], limit=query.limit, request=request, filter_query_ids=query.used_ids)
+    by_text_search = await full_text_search(request, query.text)
+    by_text_search_title = await full_text_search(request, query.text, ts_index="ts_extra_tags_title_img")
+
+    by_embedding_search = await get_img_content_from_db([embedding], limit=query.limit, request=request, filter_query_ids=query.used_ids)
+    full_list = by_text_search["list_of_data"] + by_embedding_search["list_of_data"] + by_text_search_title["list_of_data"]
+    random.shuffle(full_list)
+    return {"list_of_data": full_list}
 
 
 @app.get("/find_video_by_image")
-async def find_data_by_image_embedding(query: ImageQueryRaw, request: Request) -> ListOfResultData:
+async def find_video_by_image(query: ImageQueryRaw, request: Request) -> ListOfResultData:
     embedding = (await get_image_embedding(query))["embedding"]
     return await get_video_content_from_db([embedding], limit=query.limit, request=request,
     filter_query_ids=query.used_ids)
 
 
 @app.get("/find_video_by_text")
-async def find_data_by_text_embedding(query: TextQueryRaw, request: Request) -> ListOfResultData:
+async def find_video_by_text(query: TextQueryRaw, request: Request) -> ListOfResultData:
     embedding = (await get_text_embedding(query))["embedding"]
     return await get_video_content_from_db([embedding], limit=query.limit, request=request, filter_query_ids=query.used_ids)
 
