@@ -47,7 +47,7 @@ VIDEO_CONTENT_BY_IMAGE_EMBEDDING = "video_content_by_image_embedding"
 LIMIT_SEARCH = 100
 NPROBE = 30
 
-CAPTION_LIMIT_SIZE = 200
+CAPTION_LIMIT_SIZE = 250
 
 CONTENT_ID = "content_id"
 EMBEDDING = "embedding"
@@ -145,10 +145,12 @@ class ListOfResultData(BaseModel):
 
 
 async def full_text_search(request, text_string, ts_index="ts", columns="content_id,extra_tags_description,urls_main_url,urls_affilated_url",
-                            table_name="img_content"):
+                            table_name="img_content", ids=(-1, ), limit=LIMIT_SEARCH):
     async with request.app.async_pool.connection() as conn:
         async with conn.cursor() as cur:
-            await cur.execute(f"SELECT  {columns} FROM {table_name} WHERE {ts_index} @@ phraseto_tsquery('english', '{text_string}') LIMIT 100;")
+            ids = ','.join([f"'{a}'" for a in list(ids)])
+            query = f"SELECT  {columns} FROM {table_name} WHERE {ts_index} @@ phraseto_tsquery('english', '{text_string}') AND NOT (content_id IN ({ids})) LIMIT {limit};"
+            await cur.execute(query)
             result_list = [{col_name: v for v, col_name in zip(row, columns.split(","))} for row in await cur.fetchall()]
             returned_data = []
             for r in result_list:
@@ -170,8 +172,8 @@ async def find_data_by_image(query: ImageQueryRaw, request: Request) -> ListOfRe
 @app.get("/find_data_by_text")
 async def find_data_by_text(query: TextQueryRaw, request: Request) -> ListOfResultData:
     embedding = (await get_text_embedding(query))["embedding"]
-    by_text_search = await full_text_search(request, query.text)
-    by_text_search_title = await full_text_search(request, query.text, ts_index="ts_extra_tags_title_img")
+    by_text_search = await full_text_search(request, query.text, ids=query.used_ids)
+    by_text_search_title = await full_text_search(request, query.text, ts_index="ts_extra_tags_title_img", ids=query.used_ids)
 
     by_embedding_search = await get_img_content_from_db([embedding], limit=query.limit, request=request, filter_query_ids=query.used_ids)
     full_list = by_text_search["list_of_data"] + by_embedding_search["list_of_data"] + by_text_search_title["list_of_data"]
@@ -190,7 +192,7 @@ async def find_video_by_image(query: ImageQueryRaw, request: Request) -> ListOfR
 async def find_video_by_text(query: TextQueryRaw, request: Request) -> ListOfResultData:
 
     embedding = (await get_text_embedding(query))["embedding"]
-    by_text_search = await full_text_search(request, query.text, table_name="video_content", ts_index="ts_video")
+    by_text_search = await full_text_search(request, query.text, table_name="video_content", ts_index="ts_video", ids=query.used_ids)
 
     by_embedding_search =await get_video_content_from_db([embedding], limit=query.limit, request=request, filter_query_ids=query.used_ids)
     full_list = by_text_search["list_of_data"] + by_embedding_search["list_of_data"]
@@ -288,7 +290,7 @@ async def get_embeddings_of_content_ids(content_ids, name_of_server=IMG_CONTENT_
     return embeddings
 
 #TODO: fi this nonsense
-TRY_TO_SEARCH = 5
+TRY_TO_SEARCH = 10
 async def get_content_from_db(embeddings, limit=LIMIT_SEARCH, 
                               filter_query_ids=None, 
                               table_name=IMG_CONTENT_BY_IMAGE_EMBEDDING, psql_table_name="img_content", 
@@ -300,6 +302,7 @@ async def get_content_from_db(embeddings, limit=LIMIT_SEARCH,
     print(filter_query_ids, "in get_content_from_db")
     if filter_query_ids is None:
         filter_query_ids = [-1]
+    ids = []
     for k in range(1, TRY_TO_SEARCH + 1):
         results = collection.search(
             anns_field=EMBEDDING,
@@ -311,14 +314,15 @@ async def get_content_from_db(embeddings, limit=LIMIT_SEARCH,
             **kwargs
         )
         filter_query_ids = set([int(a) for a in filter_query_ids])
-        ids = []
+        ids_ = []
         for hits in results:
             for hit in hits:
                 if int(hit.entity.get(CONTENT_ID)) not in filter_query_ids:
-                    ids.append(hit.entity.get(CONTENT_ID))
+                    ids_.append(hit.entity.get(CONTENT_ID))
         
-        ids = list(set(ids))
-        if ids:
+        ids_ = list(set(ids_))
+        ids.extend(ids_)
+        if len(ids) >= limit:
             break
     results = await select_columns_from_psql(columns="extra_tags_description,urls_main_url,urls_affilated_url,content_id",
                                    table_name=psql_table_name,
